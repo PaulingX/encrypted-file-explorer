@@ -1,4 +1,5 @@
 com\example\encryptedexplorer\ui\dialog\ErrorHandlingDialog.class
+com\example\encryptedexplorer\service\ThumbnailCache$1.class
 com\example\encryptedexplorer\service\ThumbnailCache.class
 com\example\encryptedexplorer\ui\ImageViewerDialog.class
 com\example\encryptedexplorer\ui\dialog\ConflictResolutionDialog.class

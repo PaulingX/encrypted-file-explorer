@@ -3,6 +3,7 @@ package com.example.encryptedexplorer.util;
 import javax.crypto.Cipher;
 import javax.crypto.CipherInputStream;
 import javax.crypto.CipherOutputStream;
+import javax.crypto.Mac;
 import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.GCMParameterSpec;
@@ -17,6 +18,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.Base64;
+import java.util.function.LongConsumer;
 
 /**
  * 加解密工具：使用 PBKDF2 派生 AES-256-GCM 密钥。
@@ -31,6 +34,7 @@ public final class EncryptionUtils {
 	private static final int GCM_TAG_LEN_BITS = 128;
 	private static final int PBKDF2_ITERATIONS = 200_000;
 	private static final SecureRandom RANDOM = new SecureRandom();
+	public static final String DIR_NAME_META = ".name.meta";
 
 	private EncryptionUtils() {}
 
@@ -112,6 +116,23 @@ public final class EncryptionUtils {
 		}
 	}
 
+	public static void encryptStream(InputStream in, OutputStream out, char[] password, LongConsumer onBytes) throws IOException, GeneralSecurityException {
+		byte[] salt = new byte[SALT_LEN];
+		RANDOM.nextBytes(salt);
+		byte[] iv = new byte[IV_LEN];
+		RANDOM.nextBytes(iv);
+		SecretKey key = deriveKey(password, salt);
+		Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+		cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(GCM_TAG_LEN_BITS, iv));
+
+		out.write(MAGIC);
+		out.write(salt);
+		out.write(iv);
+		try (CipherOutputStream cos = new CipherOutputStream(out, cipher)) {
+			copyWithProgress(in, cos, onBytes);
+		}
+	}
+
 	public static void decryptStream(InputStream in, OutputStream out, char[] password) throws IOException, GeneralSecurityException {
 		byte[] header = in.readNBytes(MAGIC.length + SALT_LEN + IV_LEN);
 		if (header.length != MAGIC.length + SALT_LEN + IV_LEN) {
@@ -131,6 +152,28 @@ public final class EncryptionUtils {
 		cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(GCM_TAG_LEN_BITS, iv));
 		try (CipherInputStream cis = new CipherInputStream(in, cipher)) {
 			copy(cis, out);
+		}
+	}
+
+	public static void decryptStream(InputStream in, OutputStream out, char[] password, LongConsumer onBytes) throws IOException, GeneralSecurityException {
+		byte[] header = in.readNBytes(MAGIC.length + SALT_LEN + IV_LEN);
+		if (header.length != MAGIC.length + SALT_LEN + IV_LEN) {
+			throw new IOException("加密头读取失败");
+		}
+		for (int i = 0; i < MAGIC.length; i++) {
+			if (header[i] != MAGIC[i]) {
+				throw new IOException("不是受支持的加密格式");
+			}
+		}
+		byte[] salt = new byte[SALT_LEN];
+		byte[] iv = new byte[IV_LEN];
+		System.arraycopy(header, MAGIC.length, salt, 0, SALT_LEN);
+		System.arraycopy(header, MAGIC.length + SALT_LEN, iv, 0, IV_LEN);
+		SecretKey key = deriveKey(password, salt);
+		Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+		cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(GCM_TAG_LEN_BITS, iv));
+		try (CipherInputStream cis = new CipherInputStream(in, cipher)) {
+			copyWithProgress(cis, out, onBytes);
 		}
 	}
 
@@ -164,6 +207,18 @@ public final class EncryptionUtils {
 		}
 	}
 
+	/**
+	 * 生成固定长度（例如16字符）的目录短名，基于 HMAC-SHA256（密码+明文目录名）并使用Base64URL无填充编码。
+	 */
+	public static String encryptDirectoryNameShort(String plainName, char[] password, int length) throws GeneralSecurityException {
+		Mac mac = Mac.getInstance("HmacSHA256");
+		SecretKeySpec key = new SecretKeySpec(new String(password).getBytes(StandardCharsets.UTF_8), "HmacSHA256");
+		mac.init(key);
+		byte[] h = mac.doFinal(plainName.getBytes(StandardCharsets.UTF_8));
+		String b64 = Base64.getUrlEncoder().withoutPadding().encodeToString(h);
+		return b64.substring(0, Math.min(length, b64.length()));
+	}
+
 	public static String decryptFileName(String encoded, char[] password) throws GeneralSecurityException, IOException {
 		byte[] packed = FileNameCodec.decodeUrlBase64(encoded);
 		byte[] plain = decryptBytes(packed, password);
@@ -182,6 +237,15 @@ public final class EncryptionUtils {
 		int read;
 		while ((read = in.read(buffer)) != -1) {
 			out.write(buffer, 0, read);
+		}
+	}
+
+	private static void copyWithProgress(InputStream in, OutputStream out, LongConsumer onBytes) throws IOException {
+		byte[] buffer = new byte[8192];
+		int read;
+		while ((read = in.read(buffer)) != -1) {
+			out.write(buffer, 0, read);
+			if (onBytes != null && read > 0) onBytes.accept(read);
 		}
 	}
 

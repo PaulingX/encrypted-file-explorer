@@ -93,12 +93,19 @@ public class CopyService {
 						 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
 						if (options.encryptFiles) {
 							LOG.debug("加密复制文件: {}", file);
-							EncryptionUtils.encryptStream(in, out, options.password);
+							EncryptionUtils.encryptStream(in, out, options.password, inc -> {
+								copied[0] += inc;
+								callbacks.onProgress(file.toString(), copied[0], totalBytes);
+							});
 						} else if (options.decryptFiles) {
 							LOG.debug("解密复制文件: {}", file);
-							EncryptionUtils.decryptStream(in, out, options.password);
+							EncryptionUtils.decryptStream(in, out, options.password, inc -> {
+								copied[0] += inc;
+								callbacks.onProgress(file.toString(), copied[0], totalBytes);
+							});
 						} else {
-							byte[] buf = new byte[FileUtilsEx.suggestBufferSize(size)];
+							// 采用较小的分块，减少内存压力
+							byte[] buf = new byte[(int)Math.min(256 * 1024, Math.max(64 * 1024, FileUtilsEx.suggestBufferSize(size)))];
 							int r;
 							while ((r = in.read(buf)) != -1) {
 								out.write(buf, 0, r);
@@ -150,9 +157,11 @@ public class CopyService {
 			boolean thisIsDirectorySegment = (i < nameCount - 1) || isDirectory; // 中间段必为目录；最后一段依据 isDirectory
 			if (thisIsDirectorySegment) {
 				if (options.encryptDirectoryNames) {
-					try { name = EncryptionUtils.encryptFileNameDeterministic(name, options.password); } catch (Exception ignored) {}
+					try {
+						name = EncryptionUtils.encryptDirectoryNameShort(name, options.password, 16);
+					} catch (Exception ignored) {}
 				} else if (options.decryptDirectoryNames) {
-					try { name = EncryptionUtils.decryptFileName(name, options.password); } catch (Exception ignored) {}
+					// 短名无法直接还原，需要外部映射，暂不在复制中做短名解密
 				}
 			}
 			current = current.resolve(name);

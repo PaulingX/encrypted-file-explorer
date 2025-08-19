@@ -145,3 +145,41 @@
 - 密码错误时的处理
 - 加密算法错误的处理
 - 文件损坏时的处理
+
+---
+
+## 打包与发布（EXE/安装器）
+
+以下命令均在项目根目录执行，要求已安装 Maven。
+
+### 环境要求
+- Windows 平台
+- JDK 11+（用于编译与 jlink）；JDK 14+（提供 jpackage，用于生成安装器）
+- 确保 `JAVA_HOME` 指向包含对应工具的 JDK，且 `mvn -v` 正常
+
+### 1）生成可直接运行的应用目录（免安装 Java）
+- 命令：
+  ```
+  mvn -DskipTests clean package
+  ```
+- 产物：`target/app/`
+  - `encrypted-file-explorer.exe`（Windows 可执行程序）
+  - `jre/`（通过 jlink 生成的最小运行时）
+  - `${artifactId}-${version}-all.jar`（包含全部依赖的可运行 JAR）
+- 使用：双击 `target/app/encrypted-file-explorer.exe` 即可运行，无需本机安装 Java
+
+### 2）生成单文件安装包（一键安装）
+- 命令：
+  ```
+  mvn -DskipTests clean verify -Pinstaller
+  ```
+- 产物：`target/installer/Encrypted File Explorer-${version}.exe`
+- 功能：
+  - 支持选择安装目录
+  - 可创建开始菜单项、桌面快捷方式
+  - 安装包内已包含最小运行时，安装后可直接使用
+
+### 常见问题
+- 若构建安装器报错提示 `jpackage` 不存在：请改用 JDK 14+ 并确保 `JAVA_HOME/bin` 下存在 `jpackage`。
+- 若杀软误报：建议对生成的 `.exe` 进行代码签名，或仅分发 `target/app/` 目录。
+- 如需自定义图标/名称：可在 `pom.xml` 的 `launch4j` 与 `jpackage`（installer profile）配置中添加 `icon`、`vendor` 等参数。

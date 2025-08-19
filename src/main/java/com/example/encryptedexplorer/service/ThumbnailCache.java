@@ -15,6 +15,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.*;
 
@@ -23,8 +25,13 @@ import java.util.concurrent.*;
  */
 public class ThumbnailCache {
 	private static final Logger LOG = LoggerFactory.getLogger(ThumbnailCache.class);
-	private final Map<Path, ImageIcon> cache = new ConcurrentHashMap<>();
-	private final ExecutorService executor = Executors.newFixedThreadPool(Math.max(2, Runtime.getRuntime().availableProcessors() / 2));
+	// LRU 缓存，最多保存 300 个缩略图，自动淘汰最久未使用
+	private final Map<Path, ImageIcon> cache = Collections.synchronizedMap(new LinkedHashMap<Path, ImageIcon>(128, 0.75f, true) {
+		@Override protected boolean removeEldestEntry(Map.Entry<Path, ImageIcon> eldest) { return size() > 300; }
+	});
+	// 限制并发加载线程数量，降低内存压力
+	private final ExecutorService executor = Executors.newFixedThreadPool(Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 2)));
+	private final Semaphore permits = new Semaphore(2);
 
 	public void getThumbnail(Path path, int size, java.util.function.Consumer<ImageIcon> callback) {
 		getThumbnail(path, size, false, null, callback);
@@ -40,11 +47,29 @@ public class ThumbnailCache {
 			return;
 		}
 		executor.submit(() -> {
-			ImageIcon icon = loadThumbnail(path, size, tryDecrypt, password);
+			ImageIcon icon = null;
+			try {
+				permits.acquire();
+				icon = loadThumbnail(path, size, tryDecrypt, password);
+			} catch (OutOfMemoryError oom) {
+				LOG.warn("内存不足，清理缩略图缓存后重试: {}", oom.toString());
+				cache.clear();
+				System.gc();
+				try {
+					icon = loadThumbnail(path, size, tryDecrypt, password);
+				} catch (Throwable t) {
+					LOG.warn("缩略图重试失败: {}", t.toString());
+				}
+			} catch (InterruptedException ie) {
+				Thread.currentThread().interrupt();
+			} finally {
+				permits.release();
+			}
 			if (icon != null) {
 				cache.put(path, icon);
 			}
-			SwingUtilities.invokeLater(() -> callback.accept(icon));
+			final ImageIcon toDeliver = icon;
+			SwingUtilities.invokeLater(() -> callback.accept(toDeliver));
 		});
 	}
 
@@ -65,6 +90,8 @@ public class ThumbnailCache {
 			if (img == null) return null;
 			Image scaled = img.getScaledInstance(size, size, Image.SCALE_SMOOTH);
 			return new ImageIcon(scaled);
+		} catch (OutOfMemoryError oom) {
+			throw oom;
 		} catch (Exception e) {
 			LOG.debug("缩略图生成失败: {} - {}", path, e.toString());
 			return null;

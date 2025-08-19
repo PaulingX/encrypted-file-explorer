@@ -15,11 +15,11 @@ import java.awt.event.MouseEvent;
 import java.io.*;
 import java.nio.file.*;
 import java.security.GeneralSecurityException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * “查看”选项卡：浏览文件夹，展示缩略图，支持解密查看。
@@ -29,14 +29,24 @@ public class ViewPanel extends JPanel {
 	private final JTextField folderField = new JTextField();
 	private final JPasswordField passwordField = new JPasswordField();
 	private final JCheckBox decryptFiles = new JCheckBox("解密文件");
+	private final JCheckBox includeSubdirs = new JCheckBox("包含子文件夹");
 	private volatile boolean directoryTransformEnabled = false; // 菜单总开关
 	private final JButton chooseButton = new JButton("选择文件夹");
-
 	private final JPanel grid = new JPanel(new WrapLayout(FlowLayout.LEFT, 10, 10));
 	private final JScrollPane scrollPane = new JScrollPane(grid);
 	private final ThumbnailCache thumbnailCache = new ThumbnailCache();
 
 	private Path currentFolder = null;
+
+	// 流式分页
+	private DirectoryStream<Path> dirStream = null;
+	private Iterator<Path> dirIter = null;
+	private Stream<Path> walkStream = null;
+	private Iterator<Path> walkIter = null;
+	private int loadedCount = 0;
+	private static final int PAGE_SIZE = 50;
+	private volatile boolean isLoading = false;
+	private volatile boolean endOfEntries = false;
 
 	public ViewPanel() {
 		setLayout(new BorderLayout(10, 10));
@@ -51,7 +61,7 @@ public class ViewPanel extends JPanel {
 		gc.gridx = 2; gc.weightx = 0; top.add(chooseButton, gc);
 		gc.gridx = 0; gc.gridy = 1; top.add(new JLabel("密码:"), gc);
 		gc.gridx = 1; gc.weightx = 1; top.add(passwordField, gc);
-		gc.gridx = 2; gc.weightx = 0; JPanel right = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0)); right.add(decryptFiles); top.add(right, gc);
+		gc.gridx = 2; gc.weightx = 0; JPanel right = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0)); right.add(decryptFiles); right.add(includeSubdirs); top.add(right, gc);
 		add(top, BorderLayout.NORTH);
 
 		scrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
@@ -59,14 +69,25 @@ public class ViewPanel extends JPanel {
 		scrollPane.getVerticalScrollBar().setUnitIncrement(24);
 		add(scrollPane, BorderLayout.CENTER);
 
+		scrollPane.getVerticalScrollBar().addAdjustmentListener(e -> maybeLoadMore());
+		scrollPane.addMouseWheelListener(e -> { if (e.getWheelRotation() > 0) maybeLoadMore(); });
+
 		chooseButton.addActionListener(e -> chooseFolder());
-		decryptFiles.addActionListener(e -> refreshGrid());
+		decryptFiles.addActionListener(e -> { if (currentFolder != null) openFolder(currentFolder); });
+		includeSubdirs.addActionListener(e -> { if (currentFolder != null) openFolder(currentFolder); });
 	}
 
 	public void setDirectoryTransformEnabled(boolean enabled) {
 		this.directoryTransformEnabled = enabled;
 		LOG.info("查看页-目录名加/解密总开关: {}", enabled ? "开启" : "关闭");
-		refreshGrid();
+		if (currentFolder != null) openFolder(currentFolder);
+	}
+
+	private void closeStream() {
+		try { if (dirStream != null) dirStream.close(); } catch (IOException ignored) {}
+		dirStream = null; dirIter = null;
+		try { if (walkStream != null) walkStream.close(); } catch (Exception ignored) {}
+		walkStream = null; walkIter = null;
 	}
 
 	private void chooseFolder() {
@@ -79,18 +100,30 @@ public class ViewPanel extends JPanel {
 	}
 
 	private void openFolder(Path folder) {
+		closeStream();
 		currentFolder = folder;
 		folderField.setText(folder.toString());
-		LOG.info("打开文件夹: {}", folder);
-		refreshGrid();
+		LOG.info("打开文件夹: {}，包含子文件夹= {}", folder, includeSubdirs.isSelected());
+		try {
+			if (includeSubdirs.isSelected()) {
+				walkStream = Files.walk(currentFolder);
+				walkIter = walkStream.iterator();
+			} else {
+				dirStream = Files.newDirectoryStream(currentFolder);
+				dirIter = dirStream.iterator();
+			}
+			endOfEntries = false;
+		} catch (IOException e) {
+			JOptionPane.showMessageDialog(this, "读取目录失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+			LOG.warn("读取目录失败: {} - {}", currentFolder, e.toString());
+			return;
+		}
+		resetAndLoadFirstPage();
 	}
 
-	private void refreshGrid() {
+	private void resetAndLoadFirstPage() {
 		grid.removeAll();
-		if (currentFolder == null) {
-			revalidate(); repaint(); return;
-		}
-
+		loadedCount = 0;
 		// 向上一级
 		if (currentFolder.getParent() != null) {
 			JPanel up = new JPanel(new BorderLayout());
@@ -103,55 +136,84 @@ public class ViewPanel extends JPanel {
 			up.add(label, BorderLayout.CENTER);
 			grid.add(up);
 		}
+		appendNextPage();
+	}
 
-		List<Path> entries = new ArrayList<>();
-		try (DirectoryStream<Path> ds = Files.newDirectoryStream(currentFolder)) {
-			for (Path p : ds) entries.add(p);
-		} catch (IOException e) {
-			JOptionPane.showMessageDialog(this, "读取目录失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-			LOG.warn("读取目录失败: {} - {}", currentFolder, e.toString());
+	private void maybeLoadMore() {
+		if (isLoading || endOfEntries) return;
+		JScrollBar v = scrollPane.getVerticalScrollBar();
+		int value = v.getValue();
+		int extent = v.getVisibleAmount();
+		int max = v.getMaximum();
+		if (value + extent >= max - 48) appendNextPage();
+	}
+
+	private boolean hasNextEntry() {
+		return includeSubdirs.isSelected() ? (walkIter != null && walkIter.hasNext()) : (dirIter != null && dirIter.hasNext());
+	}
+
+	private Path nextEntry() {
+		return includeSubdirs.isSelected() ? walkIter.next() : dirIter.next();
+	}
+
+	private void appendNextPage() {
+		isLoading = true;
+		int appended = 0;
+		long t0 = System.currentTimeMillis();
+		while (appended < PAGE_SIZE && hasNextEntry()) {
+			Path p = nextEntry();
+			if (includeSubdirs.isSelected() && currentFolder.equals(p)) continue; // 跳过根本身
+			addEntryCell(p);
+			appended++;
 		}
-
-		for (int i = 0; i < entries.size(); i++) {
-			Path p = entries.get(i);
-			JPanel cell = new JPanel(new BorderLayout());
-			cell.setPreferredSize(new Dimension(140, 140));
-			String displayName = p.getFileName().toString();
-			// 规则：当菜单开启 且 勾选解密文件 时，目录名显示为解密后的名称
-			if (Files.isDirectory(p) && directoryTransformEnabled && decryptFiles.isSelected()) {
-				try { displayName = EncryptionUtils.decryptFileName(displayName, passwordField.getPassword()); } catch (Exception ignored) {}
-			}
-			JLabel label = new JLabel(displayName, SwingConstants.CENTER);
-			label.setHorizontalTextPosition(SwingConstants.CENTER);
-			label.setVerticalTextPosition(SwingConstants.BOTTOM);
-			label.setIconTextGap(6);
-			label.setToolTipText(p.toString());
-
-			boolean isEncrypted = EncryptionUtils.isEncryptedFileName(p.getFileName().toString());
-			boolean isImageByExt = FileUtilsEx.isImageFile(p);
-			if (Files.isDirectory(p)) {
-				label.setIcon(UIManager.getIcon("FileView.directoryIcon"));
-				label.addMouseListener(new MouseAdapter() {
-					@Override public void mouseClicked(MouseEvent e) { if (e.getClickCount() == 2) enterDirectory(p); }
-				});
-			} else if (isImageByExt || isEncrypted) {
-				// 规则：勾选解密文件时，缩略图用解密方式刷新；否则直接读取
-				thumbnailCache.getThumbnail(p, 96, decryptFiles.isSelected() || isEncrypted, passwordField.getPassword(), icon -> label.setIcon(icon != null ? icon : UIManager.getIcon("FileView.fileIcon")));
-				label.addMouseListener(new MouseAdapter() {
-					@Override public void mouseClicked(MouseEvent e) { if (e.getClickCount() == 2) openImageViewer(p); }
-				});
-			} else {
-				label.setIcon(UIManager.getIcon("FileView.fileIcon"));
-				label.addMouseListener(new MouseAdapter() {
-					@Override public void mouseClicked(MouseEvent e) { if (e.getClickCount() == 2) openFile(p); }
-				});
-			}
-			cell.add(label, BorderLayout.CENTER);
-			grid.add(cell);
-		}
-
+		if (!hasNextEntry()) endOfEntries = true;
+		loadedCount += appended;
+		isLoading = false;
 		revalidate();
 		repaint();
+		LOG.info("加载页面: +{} 项, 总已加载={}，耗时={}ms, 目录={}", appended, loadedCount, (System.currentTimeMillis() - t0), currentFolder);
+	}
+
+	private void addEntryCell(Path p) {
+		JPanel cell = new JPanel(new BorderLayout());
+		cell.setPreferredSize(new Dimension(140, 140));
+		String displayName = p.getFileName() != null ? p.getFileName().toString() : p.toString();
+		try {
+			if (Files.isDirectory(p) && directoryTransformEnabled && decryptFiles.isSelected()) {
+				displayName = EncryptionUtils.decryptFileName(displayName, passwordField.getPassword());
+			}
+		} catch (Exception ignored) {}
+		JLabel label = new JLabel(displayName, SwingConstants.CENTER);
+		label.setHorizontalTextPosition(SwingConstants.CENTER);
+		label.setVerticalTextPosition(SwingConstants.BOTTOM);
+		label.setIconTextGap(6);
+		label.setToolTipText(p.toString());
+
+		boolean isDir = Files.isDirectory(p);
+		boolean isEncrypted = !isDir && EncryptionUtils.isEncryptedFileName(displayName);
+		boolean isImageByExt = !isDir && FileUtilsEx.isImageFile(p);
+		if (isDir) {
+			label.setIcon(UIManager.getIcon("FileView.directoryIcon"));
+			label.addMouseListener(new MouseAdapter() {
+				@Override public void mouseClicked(MouseEvent e) { if (e.getClickCount() == 2) enterDirectory(p); }
+			});
+		} else if (isImageByExt || isEncrypted) {
+			thumbnailCache.getThumbnail(p, 96, decryptFiles.isSelected() || isEncrypted, passwordField.getPassword(), icon -> label.setIcon(icon != null ? icon : UIManager.getIcon("FileView.fileIcon")));
+			label.addMouseListener(new MouseAdapter() {
+				@Override public void mouseClicked(MouseEvent e) { if (e.getClickCount() == 2) openImageViewer(p); }
+			});
+		} else {
+			label.setIcon(UIManager.getIcon("FileView.fileIcon"));
+			label.addMouseListener(new MouseAdapter() {
+				@Override public void mouseClicked(MouseEvent e) { if (e.getClickCount() == 2) openFile(p); }
+			});
+		}
+		cell.add(label, BorderLayout.CENTER);
+		grid.add(cell);
+	}
+
+	private void enterDirectory(Path dir) {
+		openFolder(dir);
 	}
 
 	private void openImageViewer(Path file) {
@@ -178,10 +240,6 @@ public class ViewPanel extends JPanel {
 			}
 			return all.stream().sorted().collect(Collectors.toList());
 		}
-	}
-
-	private void enterDirectory(Path dir) {
-		openFolder(dir);
 	}
 
 	private void openFile(Path file) {
