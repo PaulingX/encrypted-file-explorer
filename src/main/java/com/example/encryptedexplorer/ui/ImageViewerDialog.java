@@ -1,0 +1,182 @@
+package com.example.encryptedexplorer.ui;
+
+import com.example.encryptedexplorer.util.EncryptionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.imageio.ImageIO;
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseWheelEvent;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.GeneralSecurityException;
+import java.util.List;
+
+/**
+ * 图片查看对话框：支持上一张/下一张、缩放与自适应、滚轮缩放/滚动与翻页。
+ */
+public class ImageViewerDialog extends JDialog {
+	private static final Logger LOG = LoggerFactory.getLogger(ImageViewerDialog.class);
+	private final List<Path> images;
+	private int index;
+	private final boolean tryDecrypt;
+	private final char[] password;
+
+	private final JLabel imageLabel = new JLabel();
+	private final JScrollPane scroll = new JScrollPane(imageLabel);
+	private double zoom = 1.0;
+	private BufferedImage currentImage;
+	private boolean autoFitOnLoad = true;
+
+	public ImageViewerDialog(Window owner, List<Path> images, int startIndex, boolean tryDecrypt, char[] password) {
+		super(owner, "图片查看", ModalityType.MODELESS);
+		this.images = images;
+		this.index = startIndex;
+		this.tryDecrypt = tryDecrypt;
+		this.password = password;
+
+		imageLabel.setHorizontalAlignment(SwingConstants.CENTER);
+		imageLabel.setVerticalAlignment(SwingConstants.CENTER);
+
+		JToolBar toolbar = new JToolBar();
+		toolbar.setFloatable(false);
+		JButton prev = new JButton("上一张");
+		JButton next = new JButton("下一张");
+		JButton fit = new JButton("适应");
+		JButton actual = new JButton("100%");
+		JButton zoomIn = new JButton("+");
+		JButton zoomOut = new JButton("-");
+		toolbar.add(prev);
+		toolbar.add(next);
+		toolbar.addSeparator();
+		toolbar.add(fit);
+		toolbar.add(actual);
+		toolbar.add(zoomOut);
+		toolbar.add(zoomIn);
+
+		setLayout(new BorderLayout());
+		add(toolbar, BorderLayout.NORTH);
+		scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+		scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+		scroll.getVerticalScrollBar().setUnitIncrement(32);
+		add(scroll, BorderLayout.CENTER);
+		setSize(1000, 800);
+		setLocationRelativeTo(owner);
+
+		prev.addActionListener(e -> { autoFitOnLoad = true; navigate(1 * -1); });
+		next.addActionListener(e -> { autoFitOnLoad = true; navigate(1); });
+		fit.addActionListener(e -> { autoFitOnLoad = true; fitToWindow(); });
+		actual.addActionListener(e -> { autoFitOnLoad = false; setZoom(1.0); });
+		zoomIn.addActionListener(e -> { autoFitOnLoad = false; setZoom(zoom * 1.25); });
+		zoomOut.addActionListener(e -> { autoFitOnLoad = false; setZoom(zoom / 1.25); });
+
+		imageLabel.addMouseWheelListener(this::onMouseWheel);
+
+		imageLabel.addMouseListener(new MouseAdapter() {
+			@Override public void mouseClicked(MouseEvent e) {
+				if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
+					autoFitOnLoad = true;
+					fitToWindow();
+				}
+			}
+		});
+
+		addWindowListener(new WindowAdapter() {
+			@Override public void windowOpened(WindowEvent e) { autoFitOnLoad = true; fitToWindow(); }
+		});
+
+		loadAndShow();
+	}
+
+	private void onMouseWheel(MouseWheelEvent e) {
+		if (e.isControlDown()) {
+			autoFitOnLoad = false;
+			if (e.getWheelRotation() < 0) setZoom(zoom * 1.1); else setZoom(zoom / 1.1);
+		} else {
+			// 当滚到顶部继续向上，上一张；滚到底部继续向下，下一张
+			JScrollBar vbar = scroll.getVerticalScrollBar();
+			boolean atTop = vbar.getValue() == vbar.getMinimum();
+			boolean atBottom = vbar.getValue() + vbar.getVisibleAmount() >= vbar.getMaximum();
+			if (e.getWheelRotation() < 0 && atTop) { autoFitOnLoad = true; navigate(-1); }
+			else if (e.getWheelRotation() > 0 && atBottom) { autoFitOnLoad = true; navigate(1); }
+		}
+	}
+
+	private void navigate(int delta) {
+		int newIndex = index + delta;
+		if (newIndex < 0 || newIndex >= images.size()) return;
+		index = newIndex;
+		loadAndShow();
+	}
+
+	private void fitToWindow() {
+		if (currentImage == null) return;
+		Dimension viewport = scroll.getViewport().getExtentSize();
+		if (viewport.width <= 0 || viewport.height <= 0) {
+			SwingUtilities.invokeLater(this::fitToWindow);
+			return;
+		}
+		double zx = (double) viewport.width / currentImage.getWidth();
+		double zy = (double) viewport.height / currentImage.getHeight();
+		setZoom(Math.max(0.05, Math.min(zx, zy)));
+	}
+
+	private void setZoom(double z) {
+		zoom = Math.max(0.05, Math.min(z, 20));
+		updateImageLabel();
+	}
+
+	private void loadAndShow() {
+		Path path = images.get(index);
+		setTitle(String.format("图片查看 (%d/%d): %s", index + 1, images.size(), path.getFileName()));
+		try {
+			currentImage = loadImage(path);
+			// 先按100%设置，再异步自适应，避免首次打开过小
+			setZoom(1.0);
+			if (autoFitOnLoad) SwingUtilities.invokeLater(this::fitToWindow);
+		} catch (Exception e) {
+			LOG.warn("打开图片失败: {} - {}", path, e.toString());
+			JOptionPane.showMessageDialog(this, "打开图片失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+		}
+	}
+
+	private void updateImageLabel() {
+		if (currentImage == null) {
+			imageLabel.setIcon(null);
+			return;
+		}
+		int w = (int) Math.max(1, Math.round(currentImage.getWidth() * zoom));
+		int h = (int) Math.max(1, Math.round(currentImage.getHeight() * zoom));
+		Image scaled = currentImage.getScaledInstance(w, h, Image.SCALE_SMOOTH);
+		imageLabel.setIcon(new ImageIcon(scaled));
+		imageLabel.setPreferredSize(new Dimension(w, h));
+		imageLabel.revalidate();
+		imageLabel.repaint();
+	}
+
+	private BufferedImage loadImage(Path file) throws Exception {
+		if (tryDecrypt || EncryptionUtils.isEncryptedFileName(file.getFileName().toString())) {
+			try (InputStream in = Files.newInputStream(file)) {
+				ByteArrayOutputStream bos = new ByteArrayOutputStream();
+				EncryptionUtils.decryptStream(in, bos, password);
+				byte[] bytes = bos.toByteArray();
+				BufferedImage img = ImageIO.read(new ByteArrayInputStream(bytes));
+				if (img == null) throw new GeneralSecurityException("解密后不是有效图片");
+				return img;
+			}
+		} else {
+			BufferedImage img = ImageIO.read(file.toFile());
+			if (img == null) throw new IllegalArgumentException("不是有效图片文件");
+			return img;
+		}
+	}
+} 
