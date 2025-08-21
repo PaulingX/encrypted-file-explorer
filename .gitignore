@@ -25,5 +25,4 @@ hs_err_pid*
 replay_pid*
 .vscode
 .idea
-target
-*.class
+/target/classes/*
