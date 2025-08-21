@@ -24,9 +24,9 @@ import java.security.GeneralSecurityException;
 import java.util.List;
 
 /**
- * 图片查看对话框：支持上一张/下一张、缩放与自适应、滚轮缩放/滚动与翻页。
+ * 图片查看窗口：支持上一张/下一张、缩放与自适应、滚轮缩放/滚动与翻页，支持左键拖拽平移。
  */
-public class ImageViewerDialog extends JDialog {
+public class ImageViewerDialog extends JFrame {
 	private static final Logger LOG = LoggerFactory.getLogger(ImageViewerDialog.class);
 	private final List<Path> images;
 	private int index;
@@ -37,13 +37,18 @@ public class ImageViewerDialog extends JDialog {
 	private final JScrollPane scroll = new JScrollPane(imageLabel);
 	private double zoom = 1.0;
 	private BufferedImage currentImage;
+	private Point dragStartLabelPoint = null;
+	private Point dragStartViewPos = null;
 
 	public ImageViewerDialog(Window owner, List<Path> images, int startIndex, boolean tryDecrypt, char[] password) {
-		super(owner, "图片查看", ModalityType.MODELESS);
+		super("图片查看");
 		this.images = images;
 		this.index = startIndex;
 		this.tryDecrypt = tryDecrypt;
 		this.password = password;
+
+		setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+		setResizable(true);
 
 		imageLabel.setHorizontalAlignment(SwingConstants.CENTER);
 		imageLabel.setVerticalAlignment(SwingConstants.CENTER);
@@ -79,19 +84,43 @@ public class ImageViewerDialog extends JDialog {
 
 		imageLabel.addMouseWheelListener(this::onMouseWheel);
 
+		// 左键双击自适应
 		imageLabel.addMouseListener(new MouseAdapter() {
 			@Override public void mouseClicked(MouseEvent e) {
 				if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
 					fitToWindow();
 				}
 			}
+			@Override public void mousePressed(MouseEvent e) {
+				if (SwingUtilities.isLeftMouseButton(e)) {
+					dragStartLabelPoint = e.getPoint();
+					JViewport vp = scroll.getViewport();
+					dragStartViewPos = vp.getViewPosition();
+				}
+			}
+		});
+		imageLabel.addMouseMotionListener(new MouseAdapter() {
+			@Override public void mouseDragged(MouseEvent e) {
+				if (dragStartLabelPoint != null && SwingUtilities.isLeftMouseButton(e)) {
+					int dx = e.getX() - dragStartLabelPoint.x;
+					int dy = e.getY() - dragStartLabelPoint.y;
+					JViewport vp = scroll.getViewport();
+					Point newPos = new Point(
+						Math.max(0, dragStartViewPos.x - dx),
+						Math.max(0, dragStartViewPos.y - dy)
+					);
+					// 约束在视图范围内
+					Dimension viewSize = vp.getView().getPreferredSize();
+					Dimension extent = vp.getExtentSize();
+					newPos.x = Math.min(newPos.x, Math.max(0, viewSize.width - extent.width));
+					newPos.y = Math.min(newPos.y, Math.max(0, viewSize.height - extent.height));
+					vp.setViewPosition(newPos);
+				}
+			}
 		});
 
-		// 自动自适应：窗口或视口尺寸变化时
+		// 自动自适应：仅窗口尺寸变化时（不在视口尺寸变化时），避免放大后被重新适配变小
 		addComponentListener(new ComponentAdapter() {
-			@Override public void componentResized(ComponentEvent e) { fitToWindow(); }
-		});
-		scroll.getViewport().addComponentListener(new ComponentAdapter() {
 			@Override public void componentResized(ComponentEvent e) { fitToWindow(); }
 		});
 
