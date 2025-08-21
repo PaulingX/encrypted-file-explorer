@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.GeneralSecurityException;
@@ -56,6 +57,21 @@ public class CopyService {
 				Path targetDir = resolveTargetPath(rel, dst, options, true);
 				Files.createDirectories(targetDir);
 				LOG.debug("创建目录: {}", targetDir);
+				// 写入短名映射（父目录/.dirnames.map），用于查看时还原显示
+				if (options.encryptDirectoryNames && rel.getNameCount() > 0) {
+					String originalName = rel.getFileName().toString();
+					String shortName = targetDir.getFileName().toString();
+					Path mapFile = targetDir.getParent() != null ? targetDir.getParent().resolve(".dirnames.map") : null;
+					if (mapFile != null) {
+						try {
+							Files.createDirectories(mapFile.getParent());
+							Files.write(mapFile, (shortName + "=" + originalName + System.lineSeparator()).getBytes(StandardCharsets.UTF_8),
+									StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+						} catch (Exception ex) {
+							LOG.warn("写入目录映射失败: {} -> {} 于 {} - {}", shortName, originalName, mapFile, ex.toString());
+						}
+					}
+				}
 				return FileVisitResult.CONTINUE;
 			}
 

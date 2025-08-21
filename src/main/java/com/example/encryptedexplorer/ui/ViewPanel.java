@@ -9,15 +9,22 @@ import org.slf4j.LoggerFactory;
 import javax.imageio.ImageIO;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
-import java.awt.*;
+import java.awt.BorderLayout;
+import java.awt.Dimension;
+import java.awt.FlowLayout;
+import java.awt.Insets;
+import java.awt.Component;
+import java.awt.Container;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
+import javax.swing.JViewport;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.GeneralSecurityException;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -30,7 +37,7 @@ public class ViewPanel extends JPanel {
 	private final JPasswordField passwordField = new JPasswordField();
 	private final JCheckBox decryptFiles = new JCheckBox("解密文件");
 	private final JCheckBox includeSubdirs = new JCheckBox("包含子文件夹");
-	private volatile boolean directoryTransformEnabled = false; // 菜单总开关
+	private volatile boolean directoryTransformEnabled = false; // 菜单总开关（不再作为还原显示的必要条件）
 	private final JButton chooseButton = new JButton("选择文件夹");
 	private final JPanel grid = new JPanel(new WrapLayout(FlowLayout.LEFT, 10, 10));
 	private final JScrollPane scrollPane = new JScrollPane(grid);
@@ -47,6 +54,11 @@ public class ViewPanel extends JPanel {
 	private static final int PAGE_SIZE = 50;
 	private volatile boolean isLoading = false;
 	private volatile boolean endOfEntries = false;
+
+	// 短名映射缓存（父目录 -> (短名->原名)） LRU 256
+	private final Map<Path, Map<String, String>> dirMapCache = new LinkedHashMap<Path, Map<String,String>>(64, 0.75f, true) {
+		@Override protected boolean removeEldestEntry(Map.Entry<Path, Map<String, String>> eldest) { return size() > 256; }
+	};
 
 	public ViewPanel() {
 		setLayout(new BorderLayout(10, 10));
@@ -79,7 +91,7 @@ public class ViewPanel extends JPanel {
 
 	public void setDirectoryTransformEnabled(boolean enabled) {
 		this.directoryTransformEnabled = enabled;
-		LOG.info("查看页-目录名加/解密总开关: {}", enabled ? "开启" : "关闭");
+		LOG.info("查看页-目录名加/解密总开关(仅用于菜单状态): {}", enabled ? "开启" : "关闭");
 		if (currentFolder != null) openFolder(currentFolder);
 	}
 
@@ -97,6 +109,31 @@ public class ViewPanel extends JPanel {
 			Path folder = chooser.getSelectedFile().toPath().toAbsolutePath().normalize();
 			openFolder(folder);
 		}
+	}
+
+	private Map<String,String> getShortNameMapFor(Path parentDir) {
+		if (parentDir == null) return Collections.emptyMap();
+		Map<String,String> m = dirMapCache.get(parentDir);
+		if (m != null) return m;
+		Path mapFile = parentDir.resolve(".dirnames.map");
+		Map<String,String> result = new HashMap<>();
+		if (Files.isRegularFile(mapFile)) {
+			try {
+				for (String line : Files.readAllLines(mapFile, StandardCharsets.UTF_8)) {
+					int eq = line.indexOf('=');
+					if (eq > 0) {
+						String k = line.substring(0, eq).trim();
+						String v = line.substring(eq + 1).trim();
+						if (!k.isEmpty() && !v.isEmpty()) result.put(k, v);
+					}
+				}
+				LOG.debug("载入目录映射: {} 条 at {}", result.size(), mapFile);
+			} catch (Exception ex) {
+				LOG.warn("读取目录映射失败: {} - {}", mapFile, ex.toString());
+			}
+		}
+		dirMapCache.put(parentDir, result);
+		return result;
 	}
 
 	private void openFolder(Path folder) {
@@ -148,13 +185,8 @@ public class ViewPanel extends JPanel {
 		if (value + extent >= max - 48) appendNextPage();
 	}
 
-	private boolean hasNextEntry() {
-		return includeSubdirs.isSelected() ? (walkIter != null && walkIter.hasNext()) : (dirIter != null && dirIter.hasNext());
-	}
-
-	private Path nextEntry() {
-		return includeSubdirs.isSelected() ? walkIter.next() : dirIter.next();
-	}
+	private boolean hasNextEntry() { return includeSubdirs.isSelected() ? (walkIter != null && walkIter.hasNext()) : (dirIter != null && dirIter.hasNext()); }
+	private Path nextEntry() { return includeSubdirs.isSelected() ? walkIter.next() : dirIter.next(); }
 
 	private void appendNextPage() {
 		isLoading = true;
@@ -179,8 +211,16 @@ public class ViewPanel extends JPanel {
 		cell.setPreferredSize(new Dimension(140, 140));
 		String displayName = p.getFileName() != null ? p.getFileName().toString() : p.toString();
 		try {
-			if (Files.isDirectory(p) && directoryTransformEnabled && decryptFiles.isSelected()) {
-				displayName = EncryptionUtils.decryptFileName(displayName, passwordField.getPassword());
+			if (Files.isDirectory(p) && decryptFiles.isSelected()) {
+				// 1) 优先使用父目录的短名映射
+				Map<String,String> parentMap = getShortNameMapFor(p.getParent());
+				String mapped = parentMap.get(displayName);
+				if (mapped != null && !mapped.isEmpty()) {
+					displayName = mapped;
+				} else {
+					// 2) 尝试基于密码的可逆解密（兼容旧版非短名加密）
+					displayName = EncryptionUtils.decryptFileName(displayName, passwordField.getPassword());
+				}
 			}
 		} catch (Exception ignored) {}
 		JLabel label = new JLabel(displayName, SwingConstants.CENTER);
@@ -212,13 +252,11 @@ public class ViewPanel extends JPanel {
 		grid.add(cell);
 	}
 
-	private void enterDirectory(Path dir) {
-		openFolder(dir);
-	}
+	private void enterDirectory(Path dir) { openFolder(dir); }
 
 	private void openImageViewer(Path file) {
 		try {
-			List<Path> list = listCandidateImages(currentFolder);
+			java.util.List<Path> list = listCandidateImages(currentFolder);
 			int idx = list.indexOf(file);
 			if (idx < 0) idx = 0;
 			ImageViewerDialog dlg = new ImageViewerDialog(SwingUtilities.getWindowAncestor(this), list, idx, decryptFiles.isSelected(), passwordField.getPassword());
@@ -229,9 +267,9 @@ public class ViewPanel extends JPanel {
 		}
 	}
 
-	private List<Path> listCandidateImages(Path folder) throws IOException {
+	private java.util.List<Path> listCandidateImages(Path folder) throws IOException {
 		try (DirectoryStream<Path> ds = Files.newDirectoryStream(folder)) {
-			List<Path> all = new ArrayList<>();
+			java.util.List<Path> all = new java.util.ArrayList<>();
 			for (Path p : ds) {
 				if (Files.isDirectory(p)) continue;
 				if (FileUtilsEx.isImageFile(p) || EncryptionUtils.isEncryptedFileName(p.getFileName().toString())) {

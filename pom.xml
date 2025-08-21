@@ -88,6 +88,24 @@
 					</execution>
 				</executions>
 			</plugin>
+			<!-- 0) 构建前清理已存在的 jre 目录，避免 jlink 因输出目录已存在而失败 -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-antrun-plugin</artifactId>
+				<version>3.1.0</version>
+				<executions>
+					<execution>
+						<id>cleanup-jre-dir</id>
+						<phase>prepare-package</phase>
+						<goals><goal>run</goal></goals>
+						<configuration>
+							<target>
+								<delete dir="${project.build.directory}/app/jre" quiet="true" failonerror="false"/>
+							</target>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
 			<!-- 1) 使用 jlink 命令生成精简 JRE（无需模块化项目） -->
 			<plugin>
 				<groupId>org.codehaus.mojo</groupId>
