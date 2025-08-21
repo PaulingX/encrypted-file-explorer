@@ -12,6 +12,8 @@ import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -35,7 +37,6 @@ public class ImageViewerDialog extends JDialog {
 	private final JScrollPane scroll = new JScrollPane(imageLabel);
 	private double zoom = 1.0;
 	private BufferedImage currentImage;
-	private boolean autoFitOnLoad = true;
 
 	public ImageViewerDialog(Window owner, List<Path> images, int startIndex, boolean tryDecrypt, char[] password) {
 		super(owner, "图片查看", ModalityType.MODELESS);
@@ -47,51 +48,55 @@ public class ImageViewerDialog extends JDialog {
 		imageLabel.setHorizontalAlignment(SwingConstants.CENTER);
 		imageLabel.setVerticalAlignment(SwingConstants.CENTER);
 
-		JToolBar toolbar = new JToolBar();
-		toolbar.setFloatable(false);
 		JButton prev = new JButton("上一张");
 		JButton next = new JButton("下一张");
-		JButton fit = new JButton("适应");
 		JButton actual = new JButton("100%");
 		JButton zoomIn = new JButton("+");
 		JButton zoomOut = new JButton("-");
-		toolbar.add(prev);
-		toolbar.add(next);
-		toolbar.addSeparator();
-		toolbar.add(fit);
-		toolbar.add(actual);
-		toolbar.add(zoomOut);
-		toolbar.add(zoomIn);
 
 		setLayout(new BorderLayout());
-		add(toolbar, BorderLayout.NORTH);
 		scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
 		scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
 		scroll.getVerticalScrollBar().setUnitIncrement(32);
 		add(scroll, BorderLayout.CENTER);
+
+		JPanel controls = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 6));
+		controls.add(prev);
+		controls.add(next);
+		controls.add(actual);
+		controls.add(zoomOut);
+		controls.add(zoomIn);
+		add(controls, BorderLayout.SOUTH);
+
 		setSize(1000, 800);
 		setLocationRelativeTo(owner);
 
-		prev.addActionListener(e -> { autoFitOnLoad = true; navigate(1 * -1); });
-		next.addActionListener(e -> { autoFitOnLoad = true; navigate(1); });
-		fit.addActionListener(e -> { autoFitOnLoad = true; fitToWindow(); });
-		actual.addActionListener(e -> { autoFitOnLoad = false; setZoom(1.0); });
-		zoomIn.addActionListener(e -> { autoFitOnLoad = false; setZoom(zoom * 1.25); });
-		zoomOut.addActionListener(e -> { autoFitOnLoad = false; setZoom(zoom / 1.25); });
+		prev.addActionListener(e -> { navigate(1 * -1); });
+		next.addActionListener(e -> { navigate(1); });
+		actual.addActionListener(e -> { setZoom(1.0); });
+		zoomIn.addActionListener(e -> { setZoom(zoom * 1.25); });
+		zoomOut.addActionListener(e -> { setZoom(zoom / 1.25); });
 
 		imageLabel.addMouseWheelListener(this::onMouseWheel);
 
 		imageLabel.addMouseListener(new MouseAdapter() {
 			@Override public void mouseClicked(MouseEvent e) {
 				if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
-					autoFitOnLoad = true;
 					fitToWindow();
 				}
 			}
 		});
 
+		// 自动自适应：窗口或视口尺寸变化时
+		addComponentListener(new ComponentAdapter() {
+			@Override public void componentResized(ComponentEvent e) { fitToWindow(); }
+		});
+		scroll.getViewport().addComponentListener(new ComponentAdapter() {
+			@Override public void componentResized(ComponentEvent e) { fitToWindow(); }
+		});
+
 		addWindowListener(new WindowAdapter() {
-			@Override public void windowOpened(WindowEvent e) { autoFitOnLoad = true; fitToWindow(); }
+			@Override public void windowOpened(WindowEvent e) { fitToWindow(); }
 		});
 
 		loadAndShow();
@@ -99,15 +104,13 @@ public class ImageViewerDialog extends JDialog {
 
 	private void onMouseWheel(MouseWheelEvent e) {
 		if (e.isControlDown()) {
-			autoFitOnLoad = false;
 			if (e.getWheelRotation() < 0) setZoom(zoom * 1.1); else setZoom(zoom / 1.1);
 		} else {
-			// 当滚到顶部继续向上，上一张；滚到底部继续向下，下一张
 			JScrollBar vbar = scroll.getVerticalScrollBar();
 			boolean atTop = vbar.getValue() == vbar.getMinimum();
 			boolean atBottom = vbar.getValue() + vbar.getVisibleAmount() >= vbar.getMaximum();
-			if (e.getWheelRotation() < 0 && atTop) { autoFitOnLoad = true; navigate(-1); }
-			else if (e.getWheelRotation() > 0 && atBottom) { autoFitOnLoad = true; navigate(1); }
+			if (e.getWheelRotation() < 0 && atTop) { navigate(-1); }
+			else if (e.getWheelRotation() > 0 && atBottom) { navigate(1); }
 		}
 	}
 
@@ -121,10 +124,7 @@ public class ImageViewerDialog extends JDialog {
 	private void fitToWindow() {
 		if (currentImage == null) return;
 		Dimension viewport = scroll.getViewport().getExtentSize();
-		if (viewport.width <= 0 || viewport.height <= 0) {
-			SwingUtilities.invokeLater(this::fitToWindow);
-			return;
-		}
+		if (viewport.width <= 0 || viewport.height <= 0) return;
 		double zx = (double) viewport.width / currentImage.getWidth();
 		double zy = (double) viewport.height / currentImage.getHeight();
 		setZoom(Math.max(0.05, Math.min(zx, zy)));
@@ -140,9 +140,7 @@ public class ImageViewerDialog extends JDialog {
 		setTitle(String.format("图片查看 (%d/%d): %s", index + 1, images.size(), path.getFileName()));
 		try {
 			currentImage = loadImage(path);
-			// 先按100%设置，再异步自适应，避免首次打开过小
-			setZoom(1.0);
-			if (autoFitOnLoad) SwingUtilities.invokeLater(this::fitToWindow);
+			fitToWindow();
 		} catch (Exception e) {
 			LOG.warn("打开图片失败: {} - {}", path, e.toString());
 			JOptionPane.showMessageDialog(this, "打开图片失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
