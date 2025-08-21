@@ -26,7 +26,6 @@ import java.nio.file.*;
 import java.security.GeneralSecurityException;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * “查看”选项卡：浏览文件夹，展示缩略图，支持解密查看。
@@ -36,7 +35,6 @@ public class ViewPanel extends JPanel {
 	private final JTextField folderField = new JTextField();
 	private final JPasswordField passwordField = new JPasswordField();
 	private final JCheckBox decryptFiles = new JCheckBox("解密文件");
-	private final JCheckBox includeSubdirs = new JCheckBox("包含子文件夹");
 	private volatile boolean directoryTransformEnabled = false; // 菜单总开关（不再作为还原显示的必要条件）
 	private final JButton chooseButton = new JButton("选择文件夹");
 	private final JPanel grid = new JPanel(new WrapLayout(FlowLayout.LEFT, 10, 10));
@@ -45,11 +43,9 @@ public class ViewPanel extends JPanel {
 
 	private Path currentFolder = null;
 
-	// 流式分页
+	// 流式分页（仅当前目录）
 	private DirectoryStream<Path> dirStream = null;
 	private Iterator<Path> dirIter = null;
-	private Stream<Path> walkStream = null;
-	private Iterator<Path> walkIter = null;
 	private int loadedCount = 0;
 	private static final int PAGE_SIZE = 50;
 	private volatile boolean isLoading = false;
@@ -73,7 +69,7 @@ public class ViewPanel extends JPanel {
 		gc.gridx = 2; gc.weightx = 0; top.add(chooseButton, gc);
 		gc.gridx = 0; gc.gridy = 1; top.add(new JLabel("密码:"), gc);
 		gc.gridx = 1; gc.weightx = 1; top.add(passwordField, gc);
-		gc.gridx = 2; gc.weightx = 0; JPanel right = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0)); right.add(decryptFiles); right.add(includeSubdirs); top.add(right, gc);
+		gc.gridx = 2; gc.weightx = 0; JPanel right = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0)); right.add(decryptFiles); top.add(right, gc);
 		add(top, BorderLayout.NORTH);
 
 		scrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
@@ -86,7 +82,6 @@ public class ViewPanel extends JPanel {
 
 		chooseButton.addActionListener(e -> chooseFolder());
 		decryptFiles.addActionListener(e -> { if (currentFolder != null) openFolder(currentFolder); });
-		includeSubdirs.addActionListener(e -> { if (currentFolder != null) openFolder(currentFolder); });
 	}
 
 	public void setDirectoryTransformEnabled(boolean enabled) {
@@ -98,8 +93,6 @@ public class ViewPanel extends JPanel {
 	private void closeStream() {
 		try { if (dirStream != null) dirStream.close(); } catch (IOException ignored) {}
 		dirStream = null; dirIter = null;
-		try { if (walkStream != null) walkStream.close(); } catch (Exception ignored) {}
-		walkStream = null; walkIter = null;
 	}
 
 	private void chooseFolder() {
@@ -140,15 +133,10 @@ public class ViewPanel extends JPanel {
 		closeStream();
 		currentFolder = folder;
 		folderField.setText(folder.toString());
-		LOG.info("打开文件夹: {}，包含子文件夹= {}", folder, includeSubdirs.isSelected());
+		LOG.info("打开文件夹: {}", folder);
 		try {
-			if (includeSubdirs.isSelected()) {
-				walkStream = Files.walk(currentFolder);
-				walkIter = walkStream.iterator();
-			} else {
-				dirStream = Files.newDirectoryStream(currentFolder);
-				dirIter = dirStream.iterator();
-			}
+			dirStream = Files.newDirectoryStream(currentFolder);
+			dirIter = dirStream.iterator();
 			endOfEntries = false;
 		} catch (IOException e) {
 			JOptionPane.showMessageDialog(this, "读取目录失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
@@ -185,20 +173,16 @@ public class ViewPanel extends JPanel {
 		if (value + extent >= max - 48) appendNextPage();
 	}
 
-	private boolean hasNextEntry() { return includeSubdirs.isSelected() ? (walkIter != null && walkIter.hasNext()) : (dirIter != null && dirIter.hasNext()); }
-	private Path nextEntry() { return includeSubdirs.isSelected() ? walkIter.next() : dirIter.next(); }
-
 	private void appendNextPage() {
 		isLoading = true;
 		int appended = 0;
 		long t0 = System.currentTimeMillis();
-		while (appended < PAGE_SIZE && hasNextEntry()) {
-			Path p = nextEntry();
-			if (includeSubdirs.isSelected() && currentFolder.equals(p)) continue; // 跳过根本身
+		while (appended < PAGE_SIZE && dirIter != null && dirIter.hasNext()) {
+			Path p = dirIter.next();
 			addEntryCell(p);
 			appended++;
 		}
-		if (!hasNextEntry()) endOfEntries = true;
+		if (dirIter == null || !dirIter.hasNext()) endOfEntries = true;
 		loadedCount += appended;
 		isLoading = false;
 		revalidate();
@@ -212,13 +196,11 @@ public class ViewPanel extends JPanel {
 		String displayName = p.getFileName() != null ? p.getFileName().toString() : p.toString();
 		try {
 			if (Files.isDirectory(p) && decryptFiles.isSelected()) {
-				// 1) 优先使用父目录的短名映射
 				Map<String,String> parentMap = getShortNameMapFor(p.getParent());
 				String mapped = parentMap.get(displayName);
 				if (mapped != null && !mapped.isEmpty()) {
 					displayName = mapped;
 				} else {
-					// 2) 尝试基于密码的可逆解密（兼容旧版非短名加密）
 					displayName = EncryptionUtils.decryptFileName(displayName, passwordField.getPassword());
 				}
 			}
@@ -254,19 +236,6 @@ public class ViewPanel extends JPanel {
 
 	private void enterDirectory(Path dir) { openFolder(dir); }
 
-	private void openImageViewer(Path file) {
-		try {
-			java.util.List<Path> list = listCandidateImages(currentFolder);
-			int idx = list.indexOf(file);
-			if (idx < 0) idx = 0;
-			ImageViewerDialog dlg = new ImageViewerDialog(SwingUtilities.getWindowAncestor(this), list, idx, decryptFiles.isSelected(), passwordField.getPassword());
-			dlg.setVisible(true);
-		} catch (Exception e) {
-			LOG.warn("打开图片查看器失败: {} - {}", file, e.toString());
-			JOptionPane.showMessageDialog(this, "打开图片失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
-		}
-	}
-
 	private java.util.List<Path> listCandidateImages(Path folder) throws IOException {
 		try (DirectoryStream<Path> ds = Files.newDirectoryStream(folder)) {
 			java.util.List<Path> all = new java.util.ArrayList<>();
@@ -295,6 +264,19 @@ public class ViewPanel extends JPanel {
 		} catch (Exception e) {
 			JOptionPane.showMessageDialog(this, "打开文件失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
 			LOG.warn("打开文件失败: {} - {}", file, e.toString());
+		}
+	}
+
+	private void openImageViewer(Path file) {
+		try {
+			java.util.List<Path> list = listCandidateImages(currentFolder);
+			int idx = list.indexOf(file);
+			if (idx < 0) idx = 0;
+			ImageViewerDialog dlg = new ImageViewerDialog(SwingUtilities.getWindowAncestor(this), list, idx, decryptFiles.isSelected(), passwordField.getPassword());
+			dlg.setVisible(true);
+		} catch (Exception e) {
+			LOG.warn("打开图片查看器失败: {} - {}", file, e.toString());
+			JOptionPane.showMessageDialog(this, "打开图片失败: " + e.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
 		}
 	}
 
