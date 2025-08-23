@@ -88,8 +88,15 @@ public class ThumbnailCache {
 				img = ImageIO.read(path.toFile());
 			}
 			if (img == null) return null;
-			Image scaled = img.getScaledInstance(size, size, Image.SCALE_SMOOTH);
-			return new ImageIcon(scaled);
+			// 优化缩略图生成，减少内存占用
+			int newWidth = size;
+			int newHeight = size;
+			BufferedImage scaledImg = new BufferedImage(newWidth, newHeight, BufferedImage.TYPE_INT_RGB);
+			java.awt.Graphics2D g2d = scaledImg.createGraphics();
+			g2d.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+			g2d.drawImage(img, 0, 0, newWidth, newHeight, null);
+			g2d.dispose();
+			return new ImageIcon(scaledImg);
 		} catch (OutOfMemoryError oom) {
 			throw oom;
 		} catch (Exception e) {
