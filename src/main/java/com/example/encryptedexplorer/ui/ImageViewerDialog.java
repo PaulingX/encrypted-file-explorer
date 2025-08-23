@@ -5,6 +5,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.ImageInputStream;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
@@ -21,6 +23,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
+import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -196,14 +199,36 @@ public class ImageViewerDialog extends JFrame {
 				ByteArrayOutputStream bos = new ByteArrayOutputStream();
 				EncryptionUtils.decryptStream(in, bos, password);
 				byte[] bytes = bos.toByteArray();
-				BufferedImage img = ImageIO.read(new ByteArrayInputStream(bytes));
-				if (img == null) throw new GeneralSecurityException("解密后不是有效图片");
-				return img;
+				// 使用 ImageIO 的异步加载方式
+				ImageInputStream iis = ImageIO.createImageInputStream(new ByteArrayInputStream(bytes));
+				Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
+				if (!readers.hasNext()) throw new GeneralSecurityException("解密后不是有效图片");
+				ImageReader reader = readers.next();
+				try {
+					reader.setInput(iis);
+					BufferedImage img = reader.read(0);
+					if (img == null) throw new GeneralSecurityException("解密后不是有效图片");
+					return img;
+				} finally {
+					reader.dispose();
+					iis.close();
+				}
 			}
 		} else {
-			BufferedImage img = ImageIO.read(file.toFile());
-			if (img == null) throw new IllegalArgumentException("不是有效图片文件");
-			return img;
+			// 使用 ImageIO 的异步加载方式
+			ImageInputStream iis = ImageIO.createImageInputStream(file.toFile());
+			Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
+			if (!readers.hasNext()) throw new IllegalArgumentException("不是有效图片文件");
+			ImageReader reader = readers.next();
+			try {
+				reader.setInput(iis);
+				BufferedImage img = reader.read(0);
+				if (img == null) throw new IllegalArgumentException("不是有效图片文件");
+				return img;
+			} finally {
+				reader.dispose();
+				iis.close();
+			}
 		}
 	}
 } 
