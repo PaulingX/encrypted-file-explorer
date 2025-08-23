@@ -1,5 +1,8 @@
 package com.example.encryptedexplorer.util;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.crypto.*;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
@@ -26,6 +29,7 @@ public final class EncryptionUtils {
     private static final int PBKDF2_ITERATIONS = 200_000;
     private static final SecureRandom RANDOM = new SecureRandom();
     public static final String DIR_NAME_META = ".name.meta";
+    private static final Logger LOG = LoggerFactory.getLogger(EncryptionUtils.class);
 
     private EncryptionUtils() {
     }
@@ -100,9 +104,27 @@ public final class EncryptionUtils {
         out.write(MAGIC);
         out.write(salt);
         out.write(iv);
-        try (CipherOutputStream cos = new CipherOutputStream(out, cipher)) {
-            copyWithProgress(in, cos, onBytes);
+
+        // 分块处理大文件，确保 Cipher 的分块逻辑与文件流一致
+        byte[] buffer = new byte[1024 * 1024]; // 1MB 缓冲区
+        int bytesRead;
+        long totalBytesProcessed = 0;
+        while ((bytesRead = in.read(buffer)) != -1) {
+            byte[] cipherText = cipher.update(buffer, 0, bytesRead);
+            if (cipherText != null) {
+                out.write(cipherText);
+            }
+            totalBytesProcessed += bytesRead;
+            if (onBytes != null) onBytes.accept(bytesRead);
+            LOG.debug("加密分块: 已处理 {} 字节", totalBytesProcessed);
         }
+
+        // 最终调用 doFinal
+        byte[] finalCipherText = cipher.doFinal();
+        if (finalCipherText != null) {
+            out.write(finalCipherText);
+        }
+        LOG.debug("加密完成: 总计处理 {} 字节", totalBytesProcessed);
     }
 
     public static void decryptStream(InputStream in, OutputStream out, char[] password) throws IOException, GeneralSecurityException {
@@ -145,7 +167,13 @@ public final class EncryptionUtils {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(GCM_TAG_LEN_BITS, iv));
         try (CipherInputStream cis = new CipherInputStream(in, cipher)) {
-            copyWithProgress(cis, out, onBytes);
+            // 分块处理大文件
+            byte[] buffer = new byte[1024 * 1024]; // 1MB 缓冲区
+            int bytesRead;
+            while ((bytesRead = cis.read(buffer)) != -1) {
+                out.write(buffer, 0, bytesRead);
+                if (onBytes != null) onBytes.accept(bytesRead);
+            }
         }
     }
 
@@ -213,11 +241,11 @@ public final class EncryptionUtils {
     }
 
     private static void copyWithProgress(InputStream in, OutputStream out, LongConsumer onBytes) throws IOException {
-        byte[] buffer = new byte[8192];
-        int read;
-        while ((read = in.read(buffer)) != -1) {
-            out.write(buffer, 0, read);
-            if (onBytes != null && read > 0) onBytes.accept(read);
+        byte[] buffer = new byte[1024 * 1024]; // 1MB 缓冲区
+        int bytesRead;
+        while ((bytesRead = in.read(buffer)) != -1) {
+            out.write(buffer, 0, bytesRead);
+            if (onBytes != null && bytesRead > 0) onBytes.accept(bytesRead);
         }
     }
 
