@@ -5,6 +5,7 @@ import com.example.encryptedexplorer.model.ErrorDecision;
 import com.example.encryptedexplorer.model.Resolution;
 import com.example.encryptedexplorer.util.EncryptionUtils;
 import com.example.encryptedexplorer.util.FileUtilsEx;
+import com.twelvemonkeys.lang.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +55,7 @@ public class CopyService {
 			public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
 				if (callbacks.isCancelled()) return FileVisitResult.TERMINATE;
 				Path rel = src.relativize(dir);
+                if (StringUtil.isEmpty(rel.getFileName().toString())) return FileVisitResult.CONTINUE;
 				Path targetDir = resolveTargetPath(rel, dst, options, true);
 				Files.createDirectories(targetDir);
 				LOG.debug("创建目录: {}", targetDir);
