@@ -108,7 +108,7 @@ public class ViewPanel extends JPanel {
 		if (parentDir == null) return Collections.emptyMap();
 		Map<String,String> m = dirMapCache.get(parentDir);
 		if (m != null) return m;
-		Path mapFile = parentDir.resolve(".dirnames.map");
+		Path mapFile = parentDir.resolve(".name.meta.jpg");
 		Map<String,String> result = new HashMap<>();
 		if (Files.isRegularFile(mapFile)) {
 			try {

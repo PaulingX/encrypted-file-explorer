@@ -20,7 +20,7 @@ import java.util.function.LongConsumer;
  * 文件加密头格式："ENCV1" + salt(16) + iv(12) + GCM密文。
  */
 public final class EncryptionUtils {
-    public static final String ENCRYPTED_FILE_SUFFIX = ".encrypted";
+    public static final String ENCRYPTED_FILE_PREFIX = "enc_";
     private static final byte[] MAGIC = "ENCV1".getBytes(StandardCharsets.US_ASCII);
     private static final int SALT_LEN = 16;
     private static final int IV_LEN = 12;
@@ -28,7 +28,7 @@ public final class EncryptionUtils {
     private static final int GCM_TAG_LEN_BITS = 128;
     private static final int PBKDF2_ITERATIONS = 200_000;
     private static final SecureRandom RANDOM = new SecureRandom();
-    public static final String DIR_NAME_META = ".name.meta";
+    public static final String DIR_NAME_META = ".name.meta.jpg";
     private static final Logger LOG = LoggerFactory.getLogger(EncryptionUtils.class);
 
     private EncryptionUtils() {
@@ -43,16 +43,16 @@ public final class EncryptionUtils {
     }
 
     public static boolean isEncryptedFileName(String name) {
-        return name != null && name.endsWith(ENCRYPTED_FILE_SUFFIX);
+        return name != null && name.startsWith(ENCRYPTED_FILE_PREFIX);
     }
 
     public static String toEncryptedFileName(String original) {
-        return original + ENCRYPTED_FILE_SUFFIX;
+        return ENCRYPTED_FILE_PREFIX + original;
     }
 
     public static String toDecryptedFileName(String encrypted) {
         if (isEncryptedFileName(encrypted)) {
-            return encrypted.substring(0, encrypted.length() - ENCRYPTED_FILE_SUFFIX.length());
+            return encrypted.substring(ENCRYPTED_FILE_PREFIX.length());
         }
         return encrypted;
     }

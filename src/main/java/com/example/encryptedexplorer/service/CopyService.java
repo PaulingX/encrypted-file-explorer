@@ -59,11 +59,11 @@ public class CopyService {
 				Path targetDir = resolveTargetPath(rel, dst, options, true);
 				Files.createDirectories(targetDir);
 				LOG.debug("创建目录: {}", targetDir);
-				// 写入短名映射（父目录/.dirnames.map），用于查看时还原显示
+				// 写入短名映射（父目录/.name.meta.jpg），用于查看时还原显示
 				if (options.encryptDirectoryNames && rel.getNameCount() > 0) {
 					String originalName = rel.getFileName().toString();
 					String shortName = targetDir.getFileName().toString();
-					Path mapFile = targetDir.getParent() != null ? targetDir.getParent().resolve(".dirnames.map") : null;
+					Path mapFile = targetDir.getParent() != null ? targetDir.getParent().resolve(".name.meta.jpg") : null;
 					if (mapFile != null) {
 						try {
 							Files.createDirectories(mapFile.getParent());
