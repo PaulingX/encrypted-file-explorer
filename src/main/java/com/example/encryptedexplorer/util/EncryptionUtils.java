@@ -21,17 +21,39 @@ import java.util.function.LongConsumer;
  */
 public final class EncryptionUtils {
     public static final String ENCRYPTED_FILE_PREFIX = "enc_";
-    private static final byte[] MAGIC = "ENCV1".getBytes(StandardCharsets.US_ASCII);
-    private static final int SALT_LEN = 16;
-    private static final int IV_LEN = 12;
-    private static final int KEY_LEN = 32; // 256-bit
-    private static final int GCM_TAG_LEN_BITS = 128;
-    private static final int PBKDF2_ITERATIONS = 200_000;
-    private static final SecureRandom RANDOM = new SecureRandom();
+    static final byte[] MAGIC = "ENCV1".getBytes(StandardCharsets.US_ASCII);
+    static final int SALT_LEN = 16;
+    static final int IV_LEN = 12;
+    static final int KEY_LEN = 32; // 256-bit
+    static final int GCM_TAG_LEN_BITS = 128;
+    static final int PBKDF2_ITERATIONS = 200_000;
+    static final SecureRandom RANDOM = new SecureRandom();
     public static final String DIR_NAME_META = ".name.meta.jpg";
     private static final Logger LOG = LoggerFactory.getLogger(EncryptionUtils.class);
+    
+    // 定义不同文件大小的缓冲区大小
+    private static final int SMALL_BUFFER_SIZE = 8 * 1024;        // 8KB for small files
+    private static final int MEDIUM_BUFFER_SIZE = 256 * 1024;     // 256KB for medium files
+    private static final int LARGE_BUFFER_SIZE = 1024 * 1024;     // 1MB for large files
+    private static final long MEDIUM_FILE_THRESHOLD = 10 * 1024 * 1024;  // 10MB
+    private static final long LARGE_FILE_THRESHOLD = 100 * 1024 * 1024;  // 100MB
 
     private EncryptionUtils() {
+    }
+    
+    /**
+     * 根据文件大小确定最佳缓冲区大小
+     * @param fileSize 文件大小（字节）
+     * @return 推荐的缓冲区大小
+     */
+    private static int suggestBufferSize(long fileSize) {
+        if (fileSize < MEDIUM_FILE_THRESHOLD) {
+            return SMALL_BUFFER_SIZE;
+        } else if (fileSize < LARGE_FILE_THRESHOLD) {
+            return MEDIUM_BUFFER_SIZE;
+        } else {
+            return LARGE_BUFFER_SIZE;
+        }
     }
 
     public static boolean looksEncrypted(byte[] header) {
@@ -105,8 +127,15 @@ public final class EncryptionUtils {
         out.write(salt);
         out.write(iv);
 
+        // 根据文件大小选择合适的缓冲区大小
+        // 通过markSupported检查是否支持mark/reset来估计数据流类型
+        long estimatedSize = in instanceof ByteArrayInputStream ? ((ByteArrayInputStream) in).available() : -1;
+        int bufferSize = suggestBufferSize(estimatedSize > 0 ? estimatedSize : LARGE_FILE_THRESHOLD);
+        byte[] buffer = new byte[bufferSize];
+        
+        LOG.debug("加密使用缓冲区大小: {} 字节", bufferSize);
+
         // 分块处理大文件，确保 Cipher 的分块逻辑与文件流一致
-        byte[] buffer = new byte[1024 * 1024]; // 1MB 缓冲区
         int bytesRead;
         long totalBytesProcessed = 0;
         while ((bytesRead = in.read(buffer)) != -1) {
@@ -166,14 +195,25 @@ public final class EncryptionUtils {
         SecretKey key = deriveKey(password, salt);
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(GCM_TAG_LEN_BITS, iv));
+        
         try (CipherInputStream cis = new CipherInputStream(in, cipher)) {
+            // 根据文件大小选择合适的缓冲区大小
+            // 对于解密流，我们无法预先知道明文大小，所以使用默认的大缓冲区
+            int bufferSize = LARGE_BUFFER_SIZE;
+            byte[] buffer = new byte[bufferSize];
+            
+            LOG.debug("解密使用缓冲区大小: {} 字节", bufferSize);
+            
             // 分块处理大文件
-            byte[] buffer = new byte[1024 * 1024]; // 1MB 缓冲区
             int bytesRead;
+            long totalBytesProcessed = 0;
             while ((bytesRead = cis.read(buffer)) != -1) {
                 out.write(buffer, 0, bytesRead);
+                totalBytesProcessed += bytesRead;
                 if (onBytes != null) onBytes.accept(bytesRead);
+                LOG.debug("解密分块: 已处理 {} 字节", totalBytesProcessed);
             }
+            LOG.debug("解密完成: 总计处理 {} 字节", totalBytesProcessed);
         }
     }
 
@@ -225,7 +265,7 @@ public final class EncryptionUtils {
         return new String(plain, StandardCharsets.UTF_8);
     }
 
-    private static SecretKey deriveKey(char[] password, byte[] salt) throws GeneralSecurityException {
+    static SecretKey deriveKey(char[] password, byte[] salt) throws GeneralSecurityException {
         PBEKeySpec spec = new PBEKeySpec(password, salt, PBKDF2_ITERATIONS, KEY_LEN * 8);
         SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
         byte[] keyBytes = factory.generateSecret(spec).getEncoded();
@@ -233,7 +273,9 @@ public final class EncryptionUtils {
     }
 
     private static void copy(InputStream in, OutputStream out) throws IOException {
-        byte[] buffer = new byte[8192];
+        // 使用自适应缓冲区大小
+        int bufferSize = in instanceof ByteArrayInputStream ? SMALL_BUFFER_SIZE : LARGE_BUFFER_SIZE;
+        byte[] buffer = new byte[bufferSize];
         int read;
         while ((read = in.read(buffer)) != -1) {
             out.write(buffer, 0, read);
@@ -241,7 +283,9 @@ public final class EncryptionUtils {
     }
 
     private static void copyWithProgress(InputStream in, OutputStream out, LongConsumer onBytes) throws IOException {
-        byte[] buffer = new byte[1024 * 1024]; // 1MB 缓冲区
+        // 使用自适应缓冲区大小
+        int bufferSize = in instanceof ByteArrayInputStream ? SMALL_BUFFER_SIZE : LARGE_BUFFER_SIZE;
+        byte[] buffer = new byte[bufferSize];
         int bytesRead;
         while ((bytesRead = in.read(buffer)) != -1) {
             out.write(buffer, 0, bytesRead);
@@ -260,4 +304,4 @@ public final class EncryptionUtils {
         System.arraycopy(digest, 0, out, 0, Math.min(length, digest.length));
         return out;
     }
-} 
+}

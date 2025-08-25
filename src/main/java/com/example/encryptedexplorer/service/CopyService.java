@@ -3,6 +3,7 @@ package com.example.encryptedexplorer.service;
 import com.example.encryptedexplorer.model.CopyOptions;
 import com.example.encryptedexplorer.model.ErrorDecision;
 import com.example.encryptedexplorer.model.Resolution;
+import com.example.encryptedexplorer.util.EncryptedFileChannel;
 import com.example.encryptedexplorer.util.EncryptionUtils;
 import com.example.encryptedexplorer.util.FileUtilsEx;
 import com.twelvemonkeys.lang.StringUtil;
@@ -114,23 +115,43 @@ public class CopyService {
 					Files.createDirectories(targetFile.getParent());
 					if (options.encryptFiles) {
 						LOG.debug("加密复制文件: {}", file);
-						try (InputStream in = Files.newInputStream(file, StandardOpenOption.READ);
-							 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-							EncryptionUtils.encryptStream(in, out, options.password, inc -> {
+						// 对于大文件使用FileChannel优化加密复制性能
+						if (size > FILE_CHANNEL_THRESHOLD) {
+							LOG.debug("使用FileChannel加密复制大文件: {} (大小: {} 字节)", file, size);
+							EncryptedFileChannel.encryptFile(file, targetFile, options.password, inc -> {
 								copied[0] += inc;
 								callbacks.onProgress(file.toString(), copied[0], totalBytes);
 								LOG.debug("加密进度: 已处理 {} 字节 (总计: {} 字节)", copied[0], totalBytes);
 							});
+						} else {
+							try (InputStream in = Files.newInputStream(file, StandardOpenOption.READ);
+								 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+								EncryptionUtils.encryptStream(in, out, options.password, inc -> {
+									copied[0] += inc;
+									callbacks.onProgress(file.toString(), copied[0], totalBytes);
+									LOG.debug("加密进度: 已处理 {} 字节 (总计: {} 字节)", copied[0], totalBytes);
+								});
+							}
 						}
 					} else if (options.decryptFiles) {
 						LOG.debug("解密复制文件: {}", file);
-						try (InputStream in = Files.newInputStream(file, StandardOpenOption.READ);
-							 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-							EncryptionUtils.decryptStream(in, out, options.password, inc -> {
+						// 对于大文件使用FileChannel优化解密复制性能
+						if (size > FILE_CHANNEL_THRESHOLD) {
+							LOG.debug("使用FileChannel解密复制大文件: {} (大小: {} 字节)", file, size);
+							EncryptedFileChannel.decryptFile(file, targetFile, options.password, inc -> {
 								copied[0] += inc;
 								callbacks.onProgress(file.toString(), copied[0], totalBytes);
 								LOG.debug("解密进度: 已处理 {} 字节 (总计: {} 字节)", copied[0], totalBytes);
 							});
+						} else {
+							try (InputStream in = Files.newInputStream(file, StandardOpenOption.READ);
+								 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+								EncryptionUtils.decryptStream(in, out, options.password, inc -> {
+									copied[0] += inc;
+									callbacks.onProgress(file.toString(), copied[0], totalBytes);
+									LOG.debug("解密进度: 已处理 {} 字节 (总计: {} 字节)", copied[0], totalBytes);
+								});
+							}
 						}
 					} else {
 						// 对于大文件使用FileChannel优化复制性能
