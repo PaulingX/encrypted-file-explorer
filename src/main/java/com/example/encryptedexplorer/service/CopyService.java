@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -23,6 +24,10 @@ import java.util.Objects;
  */
 public class CopyService {
 	private static final Logger LOG = LoggerFactory.getLogger(CopyService.class);
+
+	// 定义使用FileChannel复制的文件大小阈值(10MB)
+	private static final long FILE_CHANNEL_THRESHOLD = 10 * 1024 * 1024L;
+
 	public interface Callbacks {
 		Resolution onConflict(Path targetPath);
 		ErrorDecision onError(Path sourcePath, Exception error);
@@ -107,33 +112,43 @@ public class CopyService {
 				// 执行复制（可选加/解密）
 				try {
 					Files.createDirectories(targetFile.getParent());
-					try (InputStream in = Files.newInputStream(file, StandardOpenOption.READ);
-						 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-						LOG.info("开始处理文件: {}, 大小: {} 字节", file, size);
-						if (options.encryptFiles) {
-							LOG.debug("加密复制文件: {}", file);
+					if (options.encryptFiles) {
+						LOG.debug("加密复制文件: {}", file);
+						try (InputStream in = Files.newInputStream(file, StandardOpenOption.READ);
+							 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
 							EncryptionUtils.encryptStream(in, out, options.password, inc -> {
 								copied[0] += inc;
 								callbacks.onProgress(file.toString(), copied[0], totalBytes);
 								LOG.debug("加密进度: 已处理 {} 字节 (总计: {} 字节)", copied[0], totalBytes);
 							});
-						} else if (options.decryptFiles) {
-							LOG.debug("解密复制文件: {}", file);
+						}
+					} else if (options.decryptFiles) {
+						LOG.debug("解密复制文件: {}", file);
+						try (InputStream in = Files.newInputStream(file, StandardOpenOption.READ);
+							 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
 							EncryptionUtils.decryptStream(in, out, options.password, inc -> {
 								copied[0] += inc;
 								callbacks.onProgress(file.toString(), copied[0], totalBytes);
 								LOG.debug("解密进度: 已处理 {} 字节 (总计: {} 字节)", copied[0], totalBytes);
 							});
+						}
+					} else {
+						// 对于大文件使用FileChannel优化复制性能
+						if (size > FILE_CHANNEL_THRESHOLD) {
+							LOG.debug("使用FileChannel复制大文件: {} (大小: {} 字节)", file, size);
+							copyFileWithFileChannel(file, targetFile, size, copied, totalBytes, callbacks);
 						} else {
-							// 采用 1MB 分块，确保大文件处理
-							byte[] buf = new byte[1024 * 1024];
-							LOG.debug("普通复制: 使用缓冲区大小 {} 字节", buf.length);
-							int r;
-							while ((r = in.read(buf)) != -1) {
-								out.write(buf, 0, r);
-								copied[0] += r;
-								callbacks.onProgress(file.toString(), copied[0], totalBytes);
-								LOG.debug("复制进度: 已处理 {} 字节 (总计: {} 字节)", copied[0], totalBytes);
+							// 普通复制
+							try (InputStream in = Files.newInputStream(file, StandardOpenOption.READ);
+								 OutputStream out = Files.newOutputStream(targetFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+								// 采用较小的分块，减少内存压力
+								byte[] buf = new byte[(int)Math.min(256 * 1024, Math.max(64 * 1024, FileUtilsEx.suggestBufferSize(size)))];
+								int r;
+								while ((r = in.read(buf)) != -1) {
+									out.write(buf, 0, r);
+									copied[0] += r;
+									callbacks.onProgress(file.toString(), copied[0], totalBytes);
+								}
 							}
 						}
 					}
@@ -171,6 +186,34 @@ public class CopyService {
 		LOG.info("复制完成: {} -> {}", src, dst);
 	}
 
+	/**
+	 * 使用FileChannel复制大文件以提高性能
+	 * 利用操作系统的零拷贝功能减少数据复制次数
+	 */
+	private void copyFileWithFileChannel(Path source, Path target, long fileSize, long[] copied, long totalBytes, Callbacks callbacks) throws IOException {
+		try (FileChannel sourceChannel = FileChannel.open(source, StandardOpenOption.READ);
+			 FileChannel targetChannel = FileChannel.open(target, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+
+			long position = 0;
+			long count = fileSize;
+			long transferred;
+
+			// 使用transferTo进行高效复制，利用系统级零拷贝优化
+			while (count > 0) {
+				transferred = sourceChannel.transferTo(position, count, targetChannel);
+				position += transferred;
+				count -= transferred;
+				copied[0] += transferred;
+				callbacks.onProgress(source.toString(), copied[0], totalBytes);
+
+				// 检查是否被取消
+				if (callbacks.isCancelled()) {
+					throw new IOException("复制被用户取消");
+				}
+			}
+		}
+	}
+
 	private Path resolveTargetPath(Path relative, Path rootTarget, CopyOptions options, boolean isDirectory) {
 		Path current = rootTarget;
 		int nameCount = relative.getNameCount();
@@ -191,4 +234,4 @@ public class CopyService {
 		}
 		return current;
 	}
-} 
+}
